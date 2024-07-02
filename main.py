@@ -1,5 +1,5 @@
 from scipy.optimize import root_scalar
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
 import numpy as np
 import math
 from dataclasses import dataclass
@@ -25,6 +25,9 @@ class SolverState:
     ivp: InitialValueProblem
     ts: list[float]
     ys: list[float]
+
+    def calculate_error(self):
+        return list(map(lambda i: abs(self.ys[i] - ivp.y(self.ts[i])), range(len(self.ts))))
 
 
 @dataclass
@@ -138,6 +141,37 @@ class ExactStartValuesStrategy(StartValuesStrategy):
         return (ts, ys)
 
 
+class LinearInterpolationStrategy(ValueInterpolationStrategy):
+    def values(self, solverState: SolverState, ts: list[float]) -> list[float]:
+        print(solverState)
+
+        def get_value(t):
+            i = 0
+            while solverState.ts[i] < t:
+                i = i + 1
+                if i >= len(solverState.ts):
+                    return solverState.ys[-1]
+            i0 = i - 1
+            i1 = i
+            t0 = solverState.ts[i0]
+            t1 = solverState.ts[i1]
+            length = t1 - t0
+            l0 = 1 - (t - t0) / length
+            l1 = 1 - (t1 - t) / length
+            print(["L", t, t0, t1, len(solverState.ts), len(solverState.ys),
+                  i0, i1, l0, l1, solverState.ys[i0], solverState.ys[i1]])
+            if abs(l0 + l1 - 1) > 0.1:
+                raise "c"
+            y0 = l0 * solverState.ys[i0]
+            y1 = l1 * solverState.ys[i1]
+            o = y0 + y1
+            if o < 0:
+                raise "e"
+            return o
+
+        return list(map(get_value, ts))
+
+
 class ValuePickerInterpolationStrategy(ValueInterpolationStrategy):
     def values(self, solverState: SolverState, ts: list[float]) -> list[float]:
         return solverState.ys[(-len(ts)):]
@@ -156,9 +190,13 @@ class NewtonImplizitSolverStrategy(ImplizitSolverStrategy):
         self._error = error
 
     def solve(self, equation: ImplizitEquation) -> float:
+        iterations = 0
         x = equation.x_0
         while abs(equation.f(x)) > self._error:
             x = x - equation.f(x)/equation.f_prime(x)
+            iterations = iterations + 1
+            if iterations > 10000:
+                raise "Newton"
         return x
 
 
@@ -184,7 +222,10 @@ class Solver:
         # Interation
         t = ts[-1]
 
-        while (t < ivp.domain[1]):
+        iter = 0
+
+        while (t < ivp.domain[1] and iter < 5):
+            iter = iter + 1
             tau = self.stepSizeStrategy.next_step_size(ivp, solverState)
             steps = self.multiStepStrategy.next_steps(ivp, solverState)
 
@@ -193,12 +234,9 @@ class Solver:
             tss = list(map(lambda d: t + d * tau, range(-steps+1, 0)))
             yss = self.valueInterpolationStrategy.values(
                 solverState, tss)
+
             tss.append(t)
 
-            # print(solverState)
-
-            # print(tss)
-            # print(yss)
             phi = self.multiStepStrategy.next_step_equation(
                 ivp, steps, tau, tss, yss)
 
@@ -213,202 +251,42 @@ class Solver:
 # -- IVPs
 
 def ExponentialInitialValueProblem(exponent: float, domain: tuple[float, float]) -> InitialValueProblem:
-    return InitialValueProblem(domain, lambda t, x: exponent * x, exponent * domain[0], lambda t: math.exp(exponent * t), lambda _: exponent)
+    return InitialValueProblem(domain, lambda t, x: exponent * x, math.exp(exponent * domain[0]), lambda t: math.exp(exponent * t), lambda _: exponent)
 
 
 def ExactSolver(step_size: float) -> Solver:
     return Solver(
         ConstantStepSizeStrategy(step_size),
         BackwardDifferentiationFormulaMultiStepStrategy(3),
-        NewtonImplizitSolverStrategy(0.001),
+        NewtonImplizitSolverStrategy(0.000000001),
         ExactStartValuesStrategy(step_size),
-        ValuePickerInterpolationStrategy()
+        LinearInterpolationStrategy()
     )
+
+
+def calculate_order(ivp: InitialValueProblem, solver: Solver):
+    errors = {}
+    for step_size in [0.1, 0.01, 0.001, 0.0001]:
+        solver.stepSizeStrategy = ConstantStepSizeStrategy(step_size)
+        solver.startValuesStrategy = ExactStartValuesStrategy(step_size)
+        result = solver.solve(ivp)
+        error = result.calculate_error()
+        errors[step_size] = {"avg": sum(error) / len(error), "max": max(error)}
+    print(errors)
 
 
 if __name__ == "__main__":
-    ivp = ExponentialInitialValueProblem(2, (0, 2))
-    solver = ExactSolver(0.01)
+    ivp = ExponentialInitialValueProblem(2, (0, 5))
+    solver = ExactSolver(0.0001)
     result = solver.solve(ivp)
     exact = list(map(lambda t: ivp.y(t) + 1, result.ts))
-    fig, ax = plt.subplots()
-    ax.plot(result.ts, result.ys)
-    ax.plot(result.ts, exact)
-    plt.show()
 
+    # error = result.calculate_error()
+    # print(error)
 
-@ dataclass
-class SolverOptions:
-    # start_generator(solverState: SolverState, steps: int, t_0: float) -> (ts, ys)
-    start_generator: Callable[[SolverState, int, float],
-                              tuple[list[float], list[float]]]
-    step_size_generator: Callable[SolverState, float]
-    solver: Solver
+    calculate_order(ivp, solver)
 
-
-def start_from_exact(step_size: float) -> Callable[[SolverState, int, float], tuple[list[float], list[float]]]:
-    def f(solverState: SolverState, steps: int, t_0: float) -> tuple[list[float], list[float]]:
-        ts = []
-        ys = []
-        t = t_0
-        for i in range(steps):
-            ts.append(t)
-            ys.append(solverState.ivp.y(t))
-            t += step_size
-
-        return (ts, ys)
-
-    return f
-
-
-def exponential_initial_value_problem(exp: float) -> InitialValueProblem:
-    return InitialValueProblem(
-        (0, 2),
-        lambda t, x: exp * x,
-        1,
-        lambda t: math.exp(exp * t),
-        lambda t, x: exp
-    )
-
-
-a = exponential_initial_value_problem(2)
-
-
-@ dataclass
-class DGL:
-    dgl: Callable[[float, float], float]
-    solution: Callable[float, float]
-
-    def derivative_from_exact(self, t: float) -> float:
-        return self.dgl(t, self.solution(t))
-
-
-constDGL = DGL(lambda t, x: 0, lambda t: 1)
-
-
-def exponential(exp: float):
-    return DGL(lambda t, x: exp * x, lambda t: math.exp(exp * t))
-
-
-def solve_with_exact_solution(dgl: DGL, t0: float, tN: float, tau: float) -> tuple[list[float], list[float]]:
-    t = t0
-
-    times = []
-    points = []
-
-    while (t < tN):
-        times.append(t)
-        points.append(tau * (4*dgl.derivative_from_exact(t-tau)+2*dgl.derivative_from_exact(t-(2*tau)))-4 *
-                      dgl.solution(t-tau)+5*dgl.solution(t-(2*tau)))
-        t += tau
-
-    return (times, points)
-
-
-def dx(f, x):
-    return abs(0-f(x))
-
-
-def newtons_method(f, df, x0, e):
-    delta = dx(f, x0)
-    while delta > e:
-        x0 = x0 - f(x0)/df(x0)
-        delta = dx(f, x0)
-
-    return x0
-
-
-def bdf_weights(order: int) -> tuple[list[float], float]:
-    if order == 1:
-        return ([1/3, -4/3, 1], 2/3)
-    assert False
-
-
-def solve_implizit(dgl: DGL, weights: tuple[list[float], float], t0: float, tN: float, tau: float) -> tuple[list[float], list[float]]:
-    t = t0
-
-    # make sure the last weight is false
-    assert weights[0][len(weights[0]) - 1] == 1
-
-    times = []
-    points = []
-
-    for i in range(len(weights[0]) - 1):
-        times.append(t)
-        points.append(dgl.solution(t))
-        t += tau
-    weight_vector = np.array(weights[0][0:-1])
-    last_weight = weights[0][len(weights[0])-1]
-
-    while (t < tN):
-
-        point_len = len(points)
-
-        value_vector = np.array(
-            points[(-len(weights[0])+1):])
-
-        # print("--start--")
-        # print(points)
-        print(weight_vector)
-        print(value_vector)
-        # print("--stop--")
-
-        print(weights[1])
-        print(t)
-
-        print(np.dot(weight_vector, value_vector))
-
-        def f(x):
-            return np.dot(weight_vector, value_vector) + \
-                x * last_weight - tau * weights[1] * dgl.dgl(t, x)
-
-        nextValue = root_scalar(
-            f, bracket=[points[point_len - 1] - 2, points[point_len - 1] + 2], method='brentq')
-        times.append(t)
-        points.append(nextValue.root)
-        t += tau
-
-    return (times, points)
-
-
-def solve_constant_tau_with_exact_start(dgl: DGL, t0: float, tN: float, tau: float) -> tuple[list[float], list[float]]:
-    # Generate starting values
-    times = [t0, t0 + tau]
-    points = [dgl.solution(t0), dgl.solution(t0 + tau)]
-
-    t = t0 + 2 * tau
-
-    while (t < tN):
-        times.append(t)
-        max_index = len(points)
-        points.append(tau * (4*dgl.dgl(t-tau, points[max_index - 1])+2*dgl.dgl(t-(2*tau), points[max_index - 2]))-4 *
-                      points[max_index - 1]+5*points[max_index-2])
-
-        t += tau
-
-    return (times, points)
-
-
-dgl: DGL = exponential(2)
-
-# dgl = constDGL
-
-
-def f(x):
-    return x+5
-
-
-# print(root_scalar(f, bracket=[-10, 0], method='brentq'))
-
-solved = solve_with_exact_solution(dgl, 0, 2, 0.01)
-solved_list = solve_constant_tau_with_exact_start(dgl, 0, 1, 0.02)
-# solved_implizit = solve_implizit(
-# dgl, bdf_weights(1), 0, 2, 0.1)
-exact = list(map(lambda t: dgl.solution(t) + 1, solved[0]))
-
-fig, ax = plt.subplots()
-# ax.plot(solved[0], solved[1])
-# ax.plot(solved_list[0], solved_list[1])
-# ax.plot(solved_implizit[0], solved_implizit[1])
-# ax.plot(solved[0], exact)
-# plt.show()
+    # fig, ax = plt.subplots()
+    # ax.plot(result.ts, result.ys)
+    # ax.plot(result.ts, exact)
+    # plt.show()
