@@ -1,6 +1,4 @@
 from scipy.optimize import root_scalar
-# import matplotlib.pyplot as plt
-import numpy as np
 import math
 from dataclasses import dataclass
 from typing import Callable
@@ -26,7 +24,7 @@ class SolverState:
     ts: list[float]
     ys: list[float]
 
-    def calculate_error(self):
+    def calculate_error(self) -> list[float]:
         return list(map(lambda i: abs(self.ys[i] - ivp.y(self.ts[i])), range(len(self.ts))))
 
 
@@ -69,7 +67,7 @@ class StartValuesStrategy:
 
 
 class ValueInterpolationStrategy:
-    def values(self, solverState: SolverState, ts: list[float]) -> list[float]:
+    def value(self, solverState: SolverState, t: float) -> float:
         pass
 
 # -- Basic implementations
@@ -86,6 +84,21 @@ class ConstantStepSizeStrategy(StepSizeStrategy):
         return self._step_size
 
 
+class SwitchingStepSizeStrategy(StepSizeStrategy):
+    _step_size: tuple[float, float]
+    _step = 0
+
+    def __init__(self, step_size_1, step_size_2):
+        self._step_size = (step_size_1, step_size_2)
+
+    def max_step_size(self):
+        return max(self._step_size)
+
+    def next_step_size(self, ivp: InitialValueProblem, solverState: SolverState):
+        self._step = (self._step + 1) % 2
+        return self._step_size[self._step]
+
+
 class BackwardDifferentiationFormulaMultiStepStrategy(MultiStepStrategy):
     _order: int
     _alphas: list[float]
@@ -98,6 +111,14 @@ class BackwardDifferentiationFormulaMultiStepStrategy(MultiStepStrategy):
     def get_weights(self) -> tuple[list[float], float]:
         if (self._order == 3):
             return ([1/3, -4/3, 1], 2/3)
+        elif self._order == 4:
+            return ([-2/11, 9/11, -18/11, 1], 6/11)
+        elif self._order == 5:
+            return ([3/25, -16/25, 36/25, -48/25, 1], 12/25)
+        elif self._order == 6:
+            return ([-12/137, 75/137, -200/137, 300/137, -300/137, 1], 60/137)
+        elif self._order == 7:
+            return ([10/147, -72/147, 225/147, -400/147, 450/147, -360/147, 1], 60/147)
         else:
             raise "Invalid BDF order: " + self._order
 
@@ -142,45 +163,50 @@ class ExactStartValuesStrategy(StartValuesStrategy):
 
 
 class LinearInterpolationStrategy(ValueInterpolationStrategy):
-    def values(self, solverState: SolverState, ts: list[float]) -> list[float]:
-        print(solverState)
-
-        def get_value(t):
-            i = 0
-            while solverState.ts[i] < t:
-                i = i + 1
-                if i >= len(solverState.ts):
-                    return solverState.ys[-1]
-            i0 = i - 1
-            i1 = i
-            t0 = solverState.ts[i0]
-            t1 = solverState.ts[i1]
-            length = t1 - t0
-            l0 = 1 - (t - t0) / length
-            l1 = 1 - (t1 - t) / length
-            print(["L", t, t0, t1, len(solverState.ts), len(solverState.ys),
-                  i0, i1, l0, l1, solverState.ys[i0], solverState.ys[i1]])
-            if abs(l0 + l1 - 1) > 0.1:
-                raise "c"
-            y0 = l0 * solverState.ys[i0]
-            y1 = l1 * solverState.ys[i1]
-            o = y0 + y1
-            if o < 0:
-                raise "e"
-            return o
-
-        return list(map(get_value, ts))
+    def value(self, solverState: SolverState, t: float) -> float:
+        i = 0
+        while solverState.ts[i] < t:
+            i = i + 1
+            # this is caught earlier
+            # if i >= len(solverState.ts):
+            #     return solverState.ys[-1]
+        i0 = i - 1
+        i1 = i
+        t0 = solverState.ts[i0]
+        t1 = solverState.ts[i1]
+        length = t1 - t0
+        l0 = 1 - (t - t0) / length
+        l1 = 1 - (t1 - t) / length
+        y0 = l0 * solverState.ys[i0]
+        y1 = l1 * solverState.ys[i1]
+        o = y0 + y1
+        return o
 
 
-class ValuePickerInterpolationStrategy(ValueInterpolationStrategy):
-    def values(self, solverState: SolverState, ts: list[float]) -> list[float]:
-        return solverState.ys[(-len(ts)):]
+class HermiteInterpolationStrategy(ValueInterpolationStrategy):
+    def value(self, solverState: SolverState, t: float) -> float:
+        i = 0
+        while solverState.ts[i] < t:
+            i = i + 1
+            # this is caught earlier
+            # if i >= len(solverState.ts):
+            #     return solverState.ys[-1]
+        i0 = i - 1
+        i1 = i
+        t0 = solverState.ts[i0]
+        t1 = solverState.ts[i1]
 
+        x = (t - t0)/(t1 - t0)
+        xx = x*x
+        xxx = xx*x
 
-class LinearImplizitSolverStrategy(ImplizitSolverStrategy):
-    def solve(self, equation: ImplizitEquation) -> float:
-        return root_scalar(
-            equation.f, bracket=[equation.x_0 - 100, equation.x_0 + 100], method='brentq').root
+        y0 = solverState.ys[i0]
+        y1 = solverState.ys[i1]
+
+        m0 = solverState.ivp.f(t0, y0)
+        m1 = solverState.ivp.f(t1, y1)
+
+        return (2*xxx-3*xx+1)*y0 + (xxx-2*xx+x)*(t1-t0)*m0+(-2*xxx+3*xx)*y1+(xxx-xx)*(t1-t0)*m1
 
 
 class NewtonImplizitSolverStrategy(ImplizitSolverStrategy):
@@ -224,7 +250,13 @@ class Solver:
 
         iter = 0
 
-        while (t < ivp.domain[1] and iter < 5):
+        def get_value(t: float):
+            # because of rounding
+            if t > solverState.ts[-1]:
+                return solverState.ys[-1]
+            return self.valueInterpolationStrategy.value(solverState, t)
+
+        while (t < ivp.domain[1]):
             iter = iter + 1
             tau = self.stepSizeStrategy.next_step_size(ivp, solverState)
             steps = self.multiStepStrategy.next_steps(ivp, solverState)
@@ -232,8 +264,10 @@ class Solver:
             t += tau
 
             tss = list(map(lambda d: t + d * tau, range(-steps+1, 0)))
-            yss = self.valueInterpolationStrategy.values(
-                solverState, tss)
+
+            # yss = self.valueInterpolationStrategy.values(
+            #    solverState, tss)
+            yss = list(map(get_value, tss))
 
             tss.append(t)
 
@@ -254,13 +288,13 @@ def ExponentialInitialValueProblem(exponent: float, domain: tuple[float, float])
     return InitialValueProblem(domain, lambda t, x: exponent * x, math.exp(exponent * domain[0]), lambda t: math.exp(exponent * t), lambda _: exponent)
 
 
-def ExactSolver(step_size: float) -> Solver:
+def ExactSolver(step_size: float, bdf_order: int) -> Solver:
     return Solver(
-        ConstantStepSizeStrategy(step_size),
-        BackwardDifferentiationFormulaMultiStepStrategy(3),
+        SwitchingStepSizeStrategy(step_size, step_size * 0.1),
+        BackwardDifferentiationFormulaMultiStepStrategy(bdf_order),
         NewtonImplizitSolverStrategy(0.000000001),
         ExactStartValuesStrategy(step_size),
-        LinearInterpolationStrategy()
+        HermiteInterpolationStrategy()
     )
 
 
@@ -277,14 +311,15 @@ def calculate_order(ivp: InitialValueProblem, solver: Solver):
 
 if __name__ == "__main__":
     ivp = ExponentialInitialValueProblem(2, (0, 5))
-    solver = ExactSolver(0.0001)
+    solver = ExactSolver(0.01, 3)
     result = solver.solve(ivp)
     exact = list(map(lambda t: ivp.y(t) + 1, result.ts))
 
-    # error = result.calculate_error()
-    # print(error)
+    error = result.calculate_error()
+    print("avg: " + str(sum(error) / len(error)))
+    print("max: " + str(max(error)))
 
-    calculate_order(ivp, solver)
+    # calculate_order(ivp, solver)
 
     # fig, ax = plt.subplots()
     # ax.plot(result.ts, result.ys)
