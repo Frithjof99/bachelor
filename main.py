@@ -1,4 +1,3 @@
-from scipy.optimize import root_scalar
 import math
 from dataclasses import dataclass
 from typing import Callable
