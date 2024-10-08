@@ -1,19 +1,22 @@
 import math
 from dataclasses import dataclass
 from typing import Callable
+import numpy as np
+import numpy.typing as npt
+import matplotlib.pyplot as plt
 
 
 # -- Container
 @dataclass
 class InitialValueProblem:
     domain: tuple[float, float]
-    f: Callable[[float, float], float]
-    y_0: float
-    y: Callable[float, float] | None
+    f: Callable[[float, npt.ArrayLike], float]
+    y_0: npt.ArrayLike
+    y: Callable[float, npt.ArrayLike] | None
     # Derivative with regards to y
-    f_prime: Callable[[float, float], float] | None
+    f_prime: Callable[[float, npt.ArrayLike], npt.ArrayLike] | None
 
-    def eval_f_exact(self, t: float) -> float:
+    def eval_f_exact(self, t: float) -> npt.ArrayLike:
         return self.f(t, self.y(t))
 
 
@@ -21,9 +24,9 @@ class InitialValueProblem:
 class SolverState:
     ivp: InitialValueProblem
     ts: list[float]
-    ys: list[float]
+    ys: list[npt.ArrayLike]
 
-    def calculate_error(self) -> list[float]:
+    def calculate_error(self) -> list[npt.ArrayLike]:
         return list(map(lambda i: abs(self.ys[i] - ivp.y(self.ts[i])), range(len(self.ts))))
 
 
@@ -130,8 +133,8 @@ class BackwardDifferentiationFormulaMultiStepStrategy(MultiStepStrategy):
     # len(ts) = steps
     # len(ys) = steps - 1
     def next_step_equation(self, ivp: InitialValueProblem, steps: int, step_size: float, ts: list[float], ys: list[float]) -> ImplizitEquation:
-        const_part = sum(
-            map(lambda i: self._alphas[i] * ys[i], range(0, steps - 1)))
+        l = list(map(lambda i: self._alphas[i] * ys[i], range(0, steps - 1)))
+        const_part = np.sum(l)
         return ImplizitEquation(
             (lambda x: (const_part +
                         self._alphas[-1] * x - step_size * self._beta * ivp.f(ts[-1], x))),
@@ -205,7 +208,9 @@ class HermiteInterpolationStrategy(ValueInterpolationStrategy):
         m0 = solverState.ivp.f(t0, y0)
         m1 = solverState.ivp.f(t1, y1)
 
-        return (2*xxx-3*xx+1)*y0 + (xxx-2*xx+x)*(t1-t0)*m0+(-2*xxx+3*xx)*y1+(xxx-xx)*(t1-t0)*m1
+        r = (2*xxx-3*xx+1)*y0 + (xxx-2*xx+x)*(t1-t0) * \
+            m0+(-2*xxx+3*xx)*y1+(xxx-xx)*(t1-t0)*m1
+        return r
 
 
 class NewtonImplizitSolverStrategy(ImplizitSolverStrategy):
@@ -217,12 +222,33 @@ class NewtonImplizitSolverStrategy(ImplizitSolverStrategy):
     def solve(self, equation: ImplizitEquation) -> float:
         iterations = 0
         x = equation.x_0
-        while abs(equation.f(x)) > self._error:
-            x = x - equation.f(x)/equation.f_prime(x)
-            iterations = iterations + 1
-            if iterations > 10000:
-                raise "Newton"
-        return x
+        # x = x + dx
+        # f'*dx = -f(x)
+
+        # fig, ax = plt.subplots()
+        # ts = list(map(lambda t: t / 100, range(0, 5000)))
+        # ax.plot(ts, [equation.f(t)[0] for t in ts])
+        # ax.plot(ts, [equation.f(t)[1] for t in ts])
+        # ax.plot(result.ts, exact)
+        # plt.show()
+
+        # exit()
+
+        if x.shape[0] == 1:
+            pass
+
+        else:
+            while np.linalg.norm(equation.f(x)) > self._error:
+
+                dx = np.linalg.solve(equation.f_prime(x), -equation.f(x))
+
+                x = x + dx
+
+            # x = x - equation.f(x)/equation.f_prime(x)
+                iterations = iterations + 1
+                if iterations > 10000:
+                    raise "Newton"
+            return x
 
 
 # -- Solver
@@ -283,8 +309,8 @@ class Solver:
 
 # -- IVPs
 
-def ExponentialInitialValueProblem(exponent: float, domain: tuple[float, float]) -> InitialValueProblem:
-    return InitialValueProblem(domain, lambda t, x: exponent * x, math.exp(exponent * domain[0]), lambda t: math.exp(exponent * t), lambda _: exponent)
+def ExponentialInitialValueProblem(exponent: npt.ArrayLike, domain: tuple[float, float]) -> InitialValueProblem:
+    return InitialValueProblem(domain, lambda t, x: exponent * x, np.exp(exponent * domain[0]), lambda t: np.exp(exponent * t), lambda _: np.diag(exponent))
 
 
 def ExactSolver(step_size: float, bdf_order: int) -> Solver:
@@ -309,18 +335,39 @@ def calculate_order(ivp: InitialValueProblem, solver: Solver):
 
 
 if __name__ == "__main__":
-    ivp = ExponentialInitialValueProblem(2, (0, 5))
+
+    def f(x):
+        return np.array([x[0]**2 + x[1]**2 - 4,
+                         x[0] - x[1]**2])
+
+    def J(x):
+        return np.array([[2*x[0], 2*x[1]],
+                         [1, -2*x[1]]])
+
+    x0 = np.array([1.5, 1.5])
+
+    newton = NewtonImplizitSolverStrategy(0.00001)
+
+    solution = newton.solve(ImplizitEquation(f, J, x0))
+
+    print(solution)
+    print(f(solution))
+
+    exit()
+    print(np.diag(np.array([2, 4])))
+
+    ivp = ExponentialInitialValueProblem(np.array([2, 4]), (0, 5))
     solver = ExactSolver(0.01, 3)
     result = solver.solve(ivp)
     exact = list(map(lambda t: ivp.y(t) + 1, result.ts))
 
     error = result.calculate_error()
-    print("avg: " + str(sum(error) / len(error)))
-    print("max: " + str(max(error)))
+    # print("avg: " + str(sum(error) / len(error)))
+    # print("max: " + str(max(error)))
 
     # calculate_order(ivp, solver)
 
-    # fig, ax = plt.subplots()
-    # ax.plot(result.ts, result.ys)
+    fig, ax = plt.subplots()
+    ax.plot(result.ts, [v[0] for v in result.ys])
     # ax.plot(result.ts, exact)
-    # plt.show()
+    plt.show()
