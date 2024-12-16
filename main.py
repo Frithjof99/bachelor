@@ -45,8 +45,11 @@ class MultiStepStrategy:
     def next_tau_and_order(self, ivp: InitialValueProblem, solverState: SolverState) -> [float, int]:
         pass
 
+    def interpolate_uniform_grid(self) -> bool:
+        pass
+
     # returns phi(x), where x with phi(x)=0 is the next solution
-    def next_step_equation(self, ivp: InitialValueProblem, steps: int, step_size: float, ts: list[float], ys: list[float]) -> ImplizitEquation:
+    def next_step_equation(self, ivp: InitialValueProblem, order: int, step_size: float, ts: list[float], ys: list[float]) -> ImplizitEquation:
         pass
 
 
@@ -64,100 +67,107 @@ class ValueInterpolationStrategy:
     def value(self, solverState: SolverState, t: float) -> float:
         pass
 
+
 # -- Basic implementations
+bdf_weights = {
+    1: ([-1, 1], 1),
+    2: ([1/3, -4/3, 1], 2/3),
+    3: ([-2/11, 9/11, -18/11, 1], 6/11),
+    4:  ([3/25, -16/25, 36/25, -48/25, 1], 12/25),
+    5: ([-12/137, 75/137, -200/137, 300/137, -300/137, 1], 60/137),
+    6: ([10/147, -72/147, 225/147, -400/147, 450/147, -360/147, 1], 60/147)
+}
 
 
-class ConstantStepSizeStrategy(StepSizeStrategy):
-    def __init__(self, step_size: float):
-        self._step_size = step_size
+def bdf_next_step_equation(ivp: InitialValueProblem, order: int, step_size: float, ts: list[float], ys: list[npt.ArrayLike]) -> ImplizitEquation:
+    alphas, beta = bdf_weights[order]
 
-    def max_step_size(self):
-        return self._step_size
+    constant_part = np.sum([alphas[i] * ys[i] for i in range(order)], axis=0)
 
-    def next_step_size(self, ivp: InitialValueProblem, solverState: SolverState):
-        return self._step_size
+    def f(x):
+        return constant_part + alphas[-1] * x - step_size * beta * ivp.f(ts[-1], x)
 
+    def df(x):
+        return np.identity(len(x)) * alphas[-1] - step_size * beta * ivp.f_prime(ts[-1], x)
 
-class SwitchingStepSizeStrategy(StepSizeStrategy):
-    _step_size: tuple[float, float]
-    _step = 0
-
-    def __init__(self, step_size_1, step_size_2):
-        self._step_size = (step_size_1, step_size_2)
-
-    def max_step_size(self):
-        return max(self._step_size)
-
-    def next_step_size(self, ivp: InitialValueProblem, solverState: SolverState):
-        self._step = (self._step + 1) % 2
-        return self._step_size[self._step]
+    return ImplizitEquation(
+        f,
+        df,
+        ys[-1]
+    )
 
 
-class BackwardDifferentiationFormulaMultiStepStrategy(MultiStepStrategy):
+class ConstantBackwardDifferentiationFormulaMultiStepStrategy(MultiStepStrategy):
     _order: int
-    _alphas: list[float]
-    _beta: float
+    _tau: float
 
-    def __init__(self, order: int):
+    def __init__(self, tau: float, order: int):
         self._order = order
-        self._alphas, self._beta = self.get_weights()
+        self._tau = tau
 
-    def get_weights(self) -> tuple[list[float], float]:
+    def next_tau_and_order(self, ivp: InitialValueProblem, solverState: SolverState):
+        return [self._tau, self._order]
 
-        if (self._order == 1):
-            return ([-1, 1], 1)
-        elif (self._order == 2):
-            return ([1/3, -4/3, 1], 2/3)
-        elif self._order == 3:
-            return ([-2/11, 9/11, -18/11, 1], 6/11)
-        elif self._order == 4:
-            return ([3/25, -16/25, 36/25, -48/25, 1], 12/25)
-        elif self._order == 5:
-            return ([-12/137, 75/137, -200/137, 300/137, -300/137, 1], 60/137)
-        elif self._order == 6:
-            return ([10/147, -72/147, 225/147, -400/147, 450/147, -360/147, 1], 60/147)
-        else:
-            raise "Invalid BDF order: " + self._order
-
-    def max_steps(self):
-        return self._order
-
-    def next_steps(self, ivp: InitialValueProblem, solverState: SolverState):
-        return self._order
+    def interpolate_uniform_grid(self):
+        return False
 
     # len(ts) = steps
     # len(ys) = steps - 1
-    def next_step_equation(self, ivp: InitialValueProblem, steps: int, step_size: float, ts: list[float], ys: list[float]) -> ImplizitEquation:
-        l = list(map(lambda i: self._alphas[i] * ys[i], range(0, steps - 1)))
-        const_part = np.sum(l, axis=0)
-        #
-        # def f1(x):
-        #    return -ys[0] + x - step_size * ivp.f(ts[1], x)
+    def next_step_equation(self, ivp: InitialValueProblem, order: int, step_size: float, ts: list[float], ys: list[float]) -> ImplizitEquation:
 
-        # def df1(x):
-        #    r = np.identity(len(x)) - step_size * ivp.f_prime(ts[1], x)
-        #    return r
+        return bdf_next_step_equation(ivp, order, step_size, ts, ys)
 
-        # return ImplizitEquation(
-        #    f1,
-        #    df1,
-        #    ys[-1]
-        # )
 
-        def f(x):
-            return const_part + self._alphas[-1] * x - step_size * self._beta * ivp.f(ts[-1], x)
+class ConstantMoose234MultiStepStrategy(MultiStepStrategy):
 
-        def f_prime(x):
-            return (np.identity(len(x)) * self._alphas[-1] - step_size * ivp.f_prime(ts[-1], x) * self._beta)
+    _tau: float
 
-        return ImplizitEquation(
-            f,
-            f_prime,
-            ys[-1]
-        )
+    def __init__(self, tau: float):
+        self._tau = tau
+
+    def next_tau_and_order(self, ivp: InitialValueProblem, solverState: SolverState):
+        return [self._tau, 4]
+
+    def interpolate_uniform_grid(self):
+        return False
+
+    def next_step_equation()
 
 
 class IncreasingBDFStartValuesStrategy(StartValuesStrategy):
+    _step_size: float
+    _steps: int
+    _newton_error: float
+
+    def __init__(self, step_size: float, steps: int, newton_error: float):
+        self._step_size = step_size
+        self._steps = steps
+        self._newton_error = newton_error
+
+    def generate_start(self, ivp: InitialValueProblem):
+        t0 = ivp.domain[0]
+        ts = [t0]
+        ys = [ivp.y_0]
+        orders = [None]
+
+        solver = NewtonImplizitSolverStrategy(self._newton_error)
+
+        for i in range(1, self._steps):
+            ts.append(t0+i*self._step_size)
+
+            # phi = BackwardDifferentiationFormulaMultiStepStrategy(i+1).next_step_equation(
+            #    ivp, self._steps, tau, ts, ys)
+
+            phi = bdf_next_step_equation(ivp, i, self._step_size, ts, ys)
+
+            next_value = solver.solve(phi)
+
+            ys.append(next_value)
+            orders.append(i)
+        return (ts, ys, orders)
+
+
+class ExactStartValuesStrategy(StartValuesStrategy):
     _step_size: float
     _steps: int
 
@@ -165,41 +175,18 @@ class IncreasingBDFStartValuesStrategy(StartValuesStrategy):
         self._step_size = step_size
         self._steps = steps
 
-    def generate_start(self, ivp: InitialValueProblem, length: float):
-        pass
-
-        t0 = ivp.domain[0]
-        ts = [t0], ys = [ivp.y_0], orders = [None]
-
-        for i in range(1, self._steps):
-            ts.append(t0+i*self._step_size)
-
-            phi = BackwardDifferentiationFormulaMultiStepStrategy(i+1).next_step_equation(
-                ivp, self._steps, tau, ts, ys)
-
-            next_value = self.implizitSolverStrategy.solve(phi)
-
-        pass
-
-
-class ExactStartValuesStrategy(StartValuesStrategy):
-    _step_size: float
-
-    def __init__(self, step_size: float):
-        self._step_size = step_size
-
-    def generate_start(self, ivp: InitialValueProblem, length: float):
+    def generate_start(self, ivp: InitialValueProblem):
         ts = []
         ys = []
         t = ivp.domain[0]
-        end = ivp.domain[0] + length
+        end = ivp.domain[0] + self._steps * self._step_size
         while (t <= end):
             ts.append(t)
             ys.append(ivp.y(t))
 
             t += self._step_size
 
-        return (ts, ys)
+        return (ts, ys, [None for t in ts])
 
 
 class LinearInterpolationStrategy(ValueInterpolationStrategy):
@@ -272,13 +259,27 @@ class NewtonImplizitSolverStrategy(ImplizitSolverStrategy):
 
         # exit()
 
-        while np.linalg.norm(equation.f(x)) > self._error:
+        f = equation.f(x)
 
-            dx = np.linalg.solve(equation.f_prime(x), -equation.f(x))
+        xs = []
+
+        while np.linalg.norm(f) > self._error:
+
+            dx = np.linalg.solve(equation.f_prime(x), -f)
             x = x + dx
 
+            xs.append(x)
+
+            f = equation.f(x)
+
             iterations = iterations + 1
-            if iterations > 10000:
+            if iterations > 100000:
+
+                plt.clf()
+                fig, ax = plt.subplots()
+                ax.plot(range(len(xs)), xs)
+                fig.savefig("plot\\newton.png", format="png",
+                            dpi=300, bbox_inches="tight")
                 raise "Newton"
         return x
 
@@ -287,7 +288,6 @@ class NewtonImplizitSolverStrategy(ImplizitSolverStrategy):
 
 @ dataclass
 class Solver:
-    stepSizeStrategy: StepSizeStrategy
     multiStepStrategy: MultiStepStrategy
     implizitSolverStrategy: ImplizitSolverStrategy
     startValuesStrategy: StartValuesStrategy
@@ -296,11 +296,9 @@ class Solver:
     def solve(self, ivp: InitialValueProblem) -> SolverState:
 
         # Get calculate start values
-        ts, ys = self.startValuesStrategy.generate_start(ivp)
+        ts, ys, orders = self.startValuesStrategy.generate_start(ivp)
 
         print("Generated " + str(len(ts)) + " start steps")
-
-        orders = [-1 for _ in range(len(ts))]
 
         solverState = SolverState(ivp, ts, ys, orders)
 
@@ -319,27 +317,30 @@ class Solver:
 
         while (t < ivp.domain[1]):
             iter = iter + 1
-            tau = self.stepSizeStrategy.next_step_size(ivp, solverState)
-            steps = self.multiStepStrategy.next_steps(ivp, solverState)
+
+            tau, order = self.multiStepStrategy.next_tau_and_order(
+                ivp, solverState)
 
             t += tau
 
-            tss = list(map(lambda d: t + d * tau, range(-steps+1, 0)))
+            if self.multiStepStrategy.interpolate_uniform_grid():
 
-            # yss = self.valueInterpolationStrategy.values(
-            #    solverState, tss)
-            yss = list(map(get_value, tss))
-
-            tss.append(t)
+                tss = list(map(lambda d: t + d * tau, range(-order, 0)))
+                yss = list(map(get_value, tss))
+                tss.append(t)
+            else:
+                tss = ts[-order:]
+                yss = ys[-order:]
+                tss.append(t)
 
             phi = self.multiStepStrategy.next_step_equation(
-                ivp, steps, tau, tss, yss)
+                ivp, order, tau, tss, yss)
 
             next_value = self.implizitSolverStrategy.solve(phi)
 
             ts.append(t)
             ys.append(next_value)
-            orders.append(steps)
+            orders.append(order)
 
         return solverState
 
@@ -361,32 +362,20 @@ def ExponentialInitialValueProblem(exponent: npt.ArrayLike, domain: tuple[float,
     )
 
 
-def ExactSolver(step_size: float, bdf_order: int) -> Solver:
+def ConstantBDFSolver(step_size: float, bdf_order: int, newton_error: int = 1e-9) -> Solver:
     return Solver(
-        ConstantStepSizeStrategy(step_size),
-        BackwardDifferentiationFormulaMultiStepStrategy(bdf_order),
-        NewtonImplizitSolverStrategy(0.000000001),
-        ExactStartValuesStrategy(step_size),
-        HermiteInterpolationStrategy()
+        ConstantBackwardDifferentiationFormulaMultiStepStrategy(
+            step_size, bdf_order),
+        NewtonImplizitSolverStrategy(newton_error),
+        IncreasingBDFStartValuesStrategy(step_size, bdf_order, newton_error),
+        HermiteInterpolationStrategy(),
     )
 
 
-def calculate_order(ivp: InitialValueProblem, solver: Solver):
-    errors = {}
-    for step_size in [0.1, 0.01, 0.001, 0.0001, 0.00001]:
-        solver.stepSizeStrategy = ConstantStepSizeStrategy(step_size)
-        solver.startValuesStrategy = ExactStartValuesStrategy(step_size)
-        result = solver.solve(ivp)
-        error = result.calculate_error()
-        norms = [np.linalg.norm(v) for v in error]
-        errors[step_size] = {"avg": np.mean(norms), "max": np.max(norms)}
-    print(errors)
-
-
-def eoc(ivp: InitialValueProblem, solver: Solver, taus: list[float]):
+def eoc(ivp: InitialValueProblem, taus: list[float], solverGenerator: Callable[float, Solver]):
     errors = []
     for tau in taus:
-        solver.stepSizeStrategy = ConstantStepSizeStrategy(tau)
+        solver = solverGenerator(tau)
         result = solver.solve(ivp)
         error = result.calculate_error()
         norms = [np.linalg.norm(v) for v in error]
@@ -394,10 +383,13 @@ def eoc(ivp: InitialValueProblem, solver: Solver, taus: list[float]):
     return errors
 
 
-def print_eoc(taus: list[float], max_errors: list[float], expected: None, name: str):
+def print_eoc(taus: list[float], max_errors: list[float], expected_order: int, name: str):
     fig, ax = plt.subplots()
 
-    ax.plot(taus, taus, linestyle="dashed", label="soll")
+    scale = np.mean(max_errors / np.power(taus, expected_order))
+
+    ax.plot(taus, np.power(taus, expected_order)*scale,
+            linestyle="dashed", label="EOC" + str(expected_order))
     ax.plot(taus, max_errors, marker='o', label="ist")
     ax.set_xlabel("step size")
     ax.set_ylabel("max error")
@@ -413,6 +405,8 @@ def print_eoc(taus: list[float], max_errors: list[float], expected: None, name: 
 
     fig.savefig("plot\\" + name + "_eoc.png", format="png",
                 dpi=300, bbox_inches="tight")
+
+    plt.clf()
 
 
 def print_solver_result_scalar_with_exact(result: SolverState, name: str):
@@ -433,9 +427,15 @@ def print_solver_result_scalar_with_exact(result: SolverState, name: str):
 
     error = result.calculate_error()
 
+    rel_error = [np.abs(np.max(error[:i+1])) / np.abs(np.max(result.ys[:i+1]))
+                 for i in range(len(result.ts))]
+
+    print("Max Error: " + str(np.max(rel_error)))
+    print("Last Error: " + str(rel_error[-1]))
+
     fig, ax = plt.subplots()
-    ax.plot(result.ts, [np.abs(error[i] / result.ys[i])
-            for i in range(len(result.ts))])
+
+    ax.plot(result.ts, rel_error)
     ax.set_title("Relativer Fehler")
     formatter = ScalarFormatter(useMathText=True)
     formatter.set_scientific(True)
@@ -453,6 +453,7 @@ def print_solver_result_scalar_with_exact(result: SolverState, name: str):
     ax.set_title("Ordnung")
     ax.set_xlabel("$t$")
     ax.set_ylabel("$order(t)$")
+    ax.set_ylim(bottom=0)
     fig.savefig("plot\\" + name + "_order.png", format="png",
                 dpi=300, bbox_inches="tight")
     plt.clf()
@@ -482,21 +483,48 @@ def print_solver_result_scalar_with_exact(result: SolverState, name: str):
 
 
 def print_solver_result_vector_with_exact(result: SolverState, name: str, dimensions_to_print: list[int]):
-    exact = [result.ivp.y(t) for t in result.ts]
+    if result.ivp.y is not None:
+        exact = [result.ivp.y(t) for t in result.ts]
 
     fig, ax = plt.subplots()
 
     for dim in dimensions_to_print:
         ax.plot(result.ts, [y[dim] for y in result.ys], marker='o', linestyle="none",
                 markerfacecolor='none', label='$y_{\\tau}^{' + str(dim) + '}(t)$')
-    for dim in dimensions_to_print:
-        ax.plot(result.ts, [e[dim] for e in exact],
-                label='$y^{' + str(dim) + '}(t)$')
+    if result.ivp.y is not None:
+        for dim in dimensions_to_print:
+            ax.plot(result.ts, [e[dim] for e in exact],
+                    label='$y^{' + str(dim) + '}(t)$')
     ax.set_title("Lösung")
     ax.set_xlabel("$t$")
     ax.legend()
     fig.savefig("plot\\" + name + "_value.png", format="png",
                 dpi=300, bbox_inches="tight")
+
+    fig, ax = plt.subplots()
+    ax.plot(result.ts, result.orders, label='$order(t)$',
+            linestyle="none", marker="o", markerfacecolor="none")
+    ax.set_title("Ordnung")
+    ax.set_xlabel("$t$")
+    ax.set_ylabel("$order(t)$")
+    ax.set_ylim(bottom=0)
+    fig.savefig("plot\\" + name + "_order.png", format="png",
+                dpi=300, bbox_inches="tight")
+
+    fig, ax = plt.subplots()
+
+    ax.plot(result.ts[:-1], [result.ts[i+1] - result.ts[i]
+            for i in range(len(result.ts) - 1)])
+
+    ax.set_xlabel("$t$")
+    ax.set_ylabel("$\\tau(t)$")
+    ax.set_title("Zeitschritte")
+
+    fig.savefig("plot\\" + name + "_tau.png", format="png",
+                dpi=300, bbox_inches="tight")
+
+    if result.ivp.y is None:
+        return
 
     error = result.calculate_error()
 
@@ -514,33 +542,18 @@ def print_solver_result_vector_with_exact(result: SolverState, name: str, dimens
     fig.savefig("plot\\" + name + "_error.png", format="png",
                 dpi=300, bbox_inches="tight")
 
-    fig, ax = plt.subplots()
-    ax.plot(result.ts, result.orders, label='$order(t)$',
-            linestyle="none", marker="o", markerfacecolor="none")
-    ax.set_title("Ordnung")
-    ax.set_xlabel("$t$")
-    ax.set_ylabel("$order(t)$")
-    fig.savefig("plot\\" + name + "_order.png", format="png",
-                dpi=300, bbox_inches="tight")
-
-    fig, ax = plt.subplots()
-
-    ax.plot(result.ts[:-1], [result.ts[i+1] - result.ts[i]
-            for i in range(len(result.ts) - 1)])
-
-    ax.set_xlabel("$t$")
-    ax.set_ylabel("$\\tau(t)$")
-    ax.set_title("Zeitschritte")
-
-    fig.savefig("plot\\" + name + "_tau.png", format="png",
-                dpi=300, bbox_inches="tight")
-
 
 def bsp1():
     # BSP1
 
-    ivp = ExponentialInitialValueProblem(np.array([1]), (0, 1))
-    solver = ExactSolver(0.01, 2)
+    order = 2
+    exponent = np.array([1])
+    domain = (0, 1)
+
+    tau = 1e-2
+
+    ivp = ExponentialInitialValueProblem(exponent, domain)
+    solver = ConstantBDFSolver(tau, order)
     start_time = time.time()
     result = solver.solve(ivp)
     print("--- %s seconds ---" % (time.time() - start_time))
@@ -549,16 +562,16 @@ def bsp1():
 
     taus = np.array([0.1, 0.05, 0.02, 0.01])
 
-    max_errors = eoc(ivp, solver, taus)
+    max_errors = eoc(ivp, taus, lambda t: ConstantBDFSolver(t, order))
 
-    print_eoc(taus, max_errors, None, "bsp1")
+    print_eoc(taus, max_errors, order, "bsp1")
 
 
 def bsp2():
 
     ivp = ExponentialInitialValueProblem(np.array([1, 0]), (0, 1))
     print(ivp)
-    solver = ExactSolver(0.01, 2)
+    solver = ConstantBDFSolver(0.01, 1)
     start_time = time.time()
     result = solver.solve(ivp)
     print("--- %s seconds ---" % (time.time() - start_time))
@@ -588,21 +601,91 @@ def bsp3():
     def dy(t): return y0*(-lambdaa)*np.exp(-lambdaa*t)+dg(t)
 
     ivp = InitialValueProblem(domain, f, y0, y, df)
-    solver = ExactSolver(1e-2, 1)
+    solver = ConstantBDFSolver(5e-3, 1)
 
     start_time = time.time()
     result = solver.solve(ivp)
     print("--- %s seconds ---" % (time.time() - start_time))
 
-    print_solver_result_scalar_with_exact(result, "bsp3")
+    error = result.calculate_error()
 
-    return
+    rel_err = [np.abs(error[i] / result.ys[i])
+               for i in range(len(result.ts))]
+
+    print("Max error: " + str(np.max(rel_err)))
+    print("Err(T): " + str(rel_err[-1]))
+
+    print_solver_result_scalar_with_exact(result, "bsp3")
 
     taus = np.array([0.1, 0.05, 0.02, 0.01])
 
-    max_errors = eoc(ivp, solver, taus)
+    max_errors = eoc(ivp, taus, lambda t: ConstantBDFSolver(t, 1))
 
-    print_eoc(taus, max_errors, None, "bsp3")
+    print_eoc(taus, max_errors, 1, "bsp3")
+
+
+def bsp4():
+
+    domain = (0, 30)
+
+    y0 = np.array(
+        [
+            2.021508061562321323838742024599621246152537461624864225861969635127894986168530050183097939110542784, 0])
+    mu = 5
+
+    def f(t, x): return np.array([x[1], mu*(1-x[0]**2)*x[1]-x[0]])
+
+    def df(t, x): return np.array([[0, -2*mu*x[0]*x[1]-1],
+                                   [1, mu*(1-x[0]**2)]])
+
+    ivp = InitialValueProblem(domain, f, y0, None, df)
+    solver = ConstantBDFSolver(1e-2, 2)
+
+    result = solver.solve(ivp)
+
+    print_solver_result_vector_with_exact(result, "bsp4",  [0, 1])
+
+    taus = [1e-2, 5e-3, 2.5e-3]
+
+    errors = []
+
+    expected_period = 11.61223066771957003455506622973852318262711328074405333346140310979401962620255595598026664353518727
+
+    for tau in taus:
+
+        eoc_solver = ConstantBDFSolver(tau, 2)
+
+        result = eoc_solver.solve(ivp)
+
+        roots = []
+        t_zero = 0
+        while t_zero + 1 < len(result.ts):
+            while t_zero + 1 < len(result.ts) and result.ys[t_zero][0] * result.ys[t_zero + 1][0] > 0:
+                t_zero = t_zero + 1
+
+            if (t_zero + 1 == len(result.ts)):
+                break
+            else:
+
+                percent_to_add = result.ys[t_zero][0] / \
+                    np.abs(result.ys[t_zero + 1][0] - result.ys[t_zero][0])
+
+                root = result.ts[t_zero] + percent_to_add * \
+                    (result.ts[t_zero + 1] - result.ts[t_zero])
+
+                roots.append(root)
+                t_zero = t_zero + 1
+
+        if len(roots) < 3:
+            print("Not enough roots found for tau = " + str(tau))
+
+        period = roots[2] - roots[0]
+
+        error = np.abs(period - expected_period)
+
+        errors.append(error)
+
+    print_eoc(taus, errors, 2, "vdP")
 
 
 if __name__ == "__main__":
@@ -610,4 +693,4 @@ if __name__ == "__main__":
     plt.rc('text', usetex=True)
     plt.rc('font', family='serif')
 
-    bsp3()
+    bsp1()
